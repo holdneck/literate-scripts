@@ -1,0 +1,346 @@
+* package management
+* USE flags
+  - https://www.gentoo.org/support/use-flags/
+* disk management
+** default file-systems
+*** ZFS
+* unified dogma
+** overlays
+   make upper overlays for all disks from a common lower overly
+   but then how do you sort data to the disks
+
+* Emacs-shell-i3 command equality
+** 
+* wrapping
+** why
+   - Fun and Profit
+   - Use multiple versions of the same program
+   - Prevents DoS, intentional or otherwise
+   - OCI hooks allow for more easily scripting cleanup
+   - Can embed my dotfiles into the container
+   - Some security protections over standard programs
+   - Better understanding of container networking
+   - Testing middle-weight client idea
+	 - Have some programs run locally, with a fat boy server running others
+	 - I want to see how seamlessly they can work
+	 - Also would produce fungible programs, .i.e. interchangeable and self-contained
+** wrapping programs
+*** containers
+**** [#A] Podman
+     + Becoming the standard container implementation
+	 + Unprivileged containers offer some security advantages 
+	 - Heavily tied to System 
+**** [#B] LXC/LXD
+     - Unsure if it has good enough tooling
+**** Docker
+     - Showing signs of aging
+**** [#C] Chroot
+     + Proven
+	 - Very minimal tooling
+**** Virtual-Machine
+     + Most secure option
+	 + Good tooling 
+	 - Significant performance hit
+	 - Much more difficult to manage 
+**** Firecracker/?Kata?
+     - Very new
+	 - I dont know them at all
+** wrapped programs
+*** Firefox
+*** Chromium
+*** Discord
+*** Emacs(as a lisp interpreter)
+*** Emacs(as an edit server)
+*** Qbitorrent
+*** ?mpv?
+* installing
+** building install media
+*** variables
+    #+BEGIN_SRC fish :async :results silent :tangle ~/downloads/tem/downlad.sh :shebang "#! /usr/bin/env fish"
+	  set LOCAL_CHROOT_DIR "/testing-other-linuxi/gentoodles"
+	  set LOCAL_TMP_DIR "$LOCAL_CHROOT_DIR/temporary"
+	  if not test -d "$LOCAL_TMP_DIR"
+		  mkdir -p "$LOCAL_TMP_DIR"
+	  end
+	  if not test -d "$LOCAL_TMP_DIR/linux-live/DOC"
+		  git clone https://github.com/Tomas-M/linux-live.git "$LOCAL_TMP_DIR/linux-live" 
+	  end
+	  set REMOTE_STAGE_URL "https://mirror.isoc.org.il/pub/gentoo//releases/amd64/autobuilds/current-stage3-amd64/hardened/"
+	  set WGET_LOG_FILE "$LOCAL_TMP_DIR/source.log"
+	  wget -r -nd --no-parent --spider -o "$WGET_LOG_FILE" "$REMOTE_STAGE_URL"
+	  grep -Po 'stage3-amd64-hardened-selinux[[:print:]]*(.xz|.gz|.DIGESTS|.asc)$' "$WGET_LOG_FILE" | tr '\n' ' ' | read -t --list DOWNLOAD_URLS
+	  for DOWNLOAD_URL in $DOWNLOAD_URLS
+		  echo $DOWNLOAD_URL
+		  wget --quiet -nd --no-parent -P "$LOCAL_TMP_DIR" --continue --xattr "$REMOTE_STAGE_URL/$DOWNLOAD_URL"
+	  end
+	  set MAIN_TARBALL (fd -1 --type file --glob 'stage3*Z.tar.xz' $LOCAL_TMP_DIR)
+	  tar --xattrs-include='*.*' --numeric-owner --overwrite -C "$LOCAL_CHROOT_DIR" -xpf "$MAIN_TARBALL"
+	  if test "$status" = "0"
+		  echo "no error"
+	  else
+		  echo "There was an error"
+	  end
+	#+END_SRC
+
+** install script itself
+*** default-variables
+**** base variables
+  #+BEGIN_SRC fish
+	set DOWNLOAD_DIR "$ROOT_DIR/downloads"
+	set REMOTE_STAGE_URL "https://mirror.isoc.org.il/pub/gentoo//releases/amd64/autobuilds/current-stage3-amd64/hardened/"
+	set HOST_OS (uname -s)
+	set HOST_ARCH (uname -m)
+  #+END_SRC
+
+  #+RESULTS:
+
+**** set changeable variables
+  #+BEGIN_SRC fish
+	echo "All yes or no questions must be answered positively with 'yes' and only 'yes'"
+	echo "Any other text is considered a 'no'"
+	read --export --universal -P "What is the root directory for this system? " ROOT_DIR
+	read --export --universal -P "What is the hostname you want? " HOST_NAME
+	read --export --universal -P "What FS do you want for the root disk? " ROOT_FS
+	read --export --universal -P "What service-manger do you want to use? " SERVICE_MANAGER
+	read --export --universal -P "Do you want to manually configure the kernel? " CONFIGURE_KERNEL_P
+  #+END_SRC
+  
+*** install Bitwarden-cli
+   On nixos, both using npm and the native exe fail
+   #+BEGIN_SRC fish
+	 #set DOWNLOAD_URL"https://vault.bitwarden.com/download/?app=cli&platform=linux"
+	 #wget -t 2 -P $ROOT_DIR/ $DOWNLOAD_URL
+	 #npm install -g @bitwarden/cli
+   #+END_SRC
+*** service manager
+   #+BEGIN_SRC fish
+	 switch (echo $SERVICE_MANAGER)
+		 case 'openrc'
+		 case 'systemd'
+		 case '*'
+	 end
+   #+END_SRC
+   
+*** setup ntp
+   #+BEGIN_SRC fish
+	 ntpd -q -g
+   #+END_SRC
+
+*** select best mirrors
+   #+BEGIN_SRC fish
+	 mirrorselect -i -o >> $ROOT_DIR/etc/portage/make.conf
+   #+END_SRC
+*** check necessary programs are available locally
+   #+BEGIN_SRC fish :tangle ~/check-necessary-programs.sh :shebang '#! /usr/bin/env fish'
+	 set PROGRAMS wget fzf du emacs sgdisk fish ntp npm fd
+	 for PROGRAM in $PROGRAMS
+		 if not which $PROGRAM
+			 emerge --search "$PROGRAM"
+		 end
+	 end
+   #+END_SRC
+
+*** dns setup
+   #+BEGIN_SRC fish
+	 set DNS_SERVERS 1.1.1.1 1.0.0.1 2606:4700:4700::1111 2606:4700:4700::1001
+	 if not test -f "$ROOT_DIR/etc/resolv.conf"
+		 touch "$ROOT_DIR/etc/resolv.conf"
+	 end
+	 for DNS_SERVER in $DNS_SERVERS
+		 echo "nameservers $DNS_SERVER" >> "$ROOT_DIR/etc/resolv.conf"
+	 end
+   #+END_SRC
+
+*** partitioning disks
+   #+BEGIN_SRC fish :results silent :tangle gentoo-install.sh :shebang "#! /usr/bin/env fish"
+		  # Create list of attached disks
+		  set --export --universal LOCAL_DISKS
+		  set ROOT_DIR ~
+		  set DISK_FILE $ROOT_DIR/.disk
+		  if not test -f "$DISK_FILE"
+			  touch "$DISK_FILE"
+		  end
+		  echo -n "" > "$DISK_FILE"
+		  set DISKS (lsblk --raw -o NAME | sed '1d' | awk '{print $1}')
+		  for DISK in $DISKS
+			set DISK_TYPE (lsblk --raw -o TYPE "/dev/$DISK" | sed '1d' | awk '{print $1}')
+			switch (echo $DISK_TYPE)
+			#case 'part*'
+			  #echo "part"
+			 # set DISK_UUID (lsblk --raw -o wwn "/dev/$DISK" | awk 'NR>1')
+			 # set DISK_SIZE (lsblk --raw -o SIZE "/dev/$DISK" | awk 'NR>1')
+			 # set DISK_BLOCKSIZE N/A
+			 # set --append LISTPARTS $DISK
+			 # echo "$DISK: partition $DISK_UUID[1] $DISK_SIZE[1] $DISK_BLOCKSIZE" >> $DISK_FILE
+			case 'disk*'
+			  #echo "disk"
+			  set DISK_ID (lsblk --raw -o wwn "/dev/$DISK" | awk 'NR>1')
+			  set DISK_SIZE (lsblk --raw -o SIZE "/dev/$DISK" | awk 'NR>1')
+			  set DISK_MOUNTPOINT (lsblk --raw -o MOUNTPOINT "/dev/$DISK" | awk 'NR>1' | awk 'NF>0')
+			  set DISK_USAGE (du -ch "$DISK_MOUNTPOINT" | tail -n 1 | cut -c -4)
+			  set DISK_BLOCKSIZE (stat -c %s -f "/dev/$DISK")
+			  set DISK_MODEL (lsblk --raw -o model "/dev/$DISK" | awk 'NR>1')
+			  set DISK_PROTO (lsblk --raw -o tran "/dev/$DISK" | awk 'NR>1')
+			  set --append --export --universal LOCAL_DISKS $DISK
+			  echo -e "$DISK | UUID: $DISK_ID[1] Total_size: $DISK_SIZE[1] 
+	 $DISK | Usage: $DISK_USAGE Blocksize: $DISK_BLOCKSIZE 
+	 $DISK | Model: $DISK_MODEL Protocol: $DISK_PROTO
+	 $DISK | Mounted: $DISK_MOUNTPOINT" >> $DISK_FILE
+			end
+		  end
+		  set --export --universal LOCAL_DISK (echo $LOCAL_DISK | sort -ud)
+		  # Set root disk
+		  printf '%s\n' $LOCAL_DISKS | fzf --preview "rg '{}' $DISK_FILE" --preview-window='top:20%' | read --export --universal ROOT_DISK
+		  set --export --universal ROOT_DISK_ID (lsblk --raw -o wwn "/dev/$ROOT_DISK" | awk 'NR>1')
+		  set --export --universal ROOT_DISK_PATH "/dev/disk/by-id/$DISK_ID[1]"
+	 
+		  if test -b "$ROOT_DISK_PATH"
+			  read -P "The next action will wipe <$ROOT_DISK>. Are you sure?" WIPE_ROOT_DISK
+			  if test $WIPE_ROOT_DISK = 'yes'
+				  #sgdisk -Z $ROOT_DISK_ID
+				  #sgdisk -n1:1M:+512M -t1:EF00 $ROOT_DISK_ID
+				  set --export --universal BOOT_DIR $ROOT_DISK'1'
+				  #mkfs.vfat -F32 $BOOT_DIR
+			  else
+				  echo "Did not wipe <$ROOT_DISK>"
+			  end
+		  end
+		  read -P "Do I need swap on this system? " SWAP_P
+		  if test "$SWAP_P" = "yes"
+			  read -P "Am I going to hibernate this system? " SWAP_HIBERNATE_P
+			  if test "$SWAP_HIBERNATE_P" = "yes"
+				  #sgdisk -n2:+$MEMORY_SIZE -t2:8200 $ROOT_DISK_ID
+			  else
+				  #sgdisk -n2:0:+500M -t2:8200 $ROOT_DISK_ID
+			  end
+		  else
+			  echo NO 
+		  end 
+   #+END_SRC
+
+   
+**** check if EFI or BIOS
+   #+BEGIN_SRC fish
+	 if ls /sys/firmware/efi/efivars >> /dev/null
+		 set --export --universal BOOT_MODE efi
+	 else
+		 set --export --universal BOOT_MODE bios
+	 end
+   #+END_SRC
+   
+**** root fs
+    #+BEGIN_SRC fish
+	  switch (echo $ROOT_FS)
+		  case 'zfs'
+			  read -P "what is the name of the root FS? " FS_NAME
+			  if not modprobe zfs >> /dev/null
+				  echo 'zfs module is not loaded into the current kernel'
+				  exit 1
+			  end
+			  echo "sys-fs/zfs-kmod ~amd64" >> /etc/portage/package.accept_keywords/zfs-kmod
+			  echo "sys-fs/zfs ~amd64" >> /etc/portage/package.accept_keywords/zfs
+			  echo "GRUB_CMDLINE_LINUX="dozfs root=ZFS=mypool/myvolume"" >> $ROOT_DIR/etc/default/grub
+			  hostid > $ROOT_DIR/etc/hostid
+			  emerge -av zfs
+			  # Run before every kernel recompiliation
+			  emerge -va @module-rebuild
+			  # Add to service manager
+			  rc-update add zfs-import sysinit
+			  rc-update add zfs-mount sysinit
+			  #rc-update add zfs-share default
+			  rc-update add zfs-zed default
+			  zpool create -f -o ashift=12 -o cachefile=$ROOT_DIR/zpool.cache -O compression=on -O xattr=sa -O relatime=on -O acltype=posixacl -O dedup=off -m none -R $ROOT_DIR $FS_NAME $ROOT_DISK_PATH
+			  zfs create -o mountpoint=none -o canmount=off $FS_NAME/ROOT
+			  zfs create -o mountpoint=/ $FS_NAME/ROOT/gentoo
+			  zpool set bootfs=$FS_NAME/ROOT/gentoo $FS_NAME
+			  zfs create -o canmount=off $FS_NAME/usr
+			  zfs create -o canmount=off $FS_NAME/var
+			  zfs create -o canmount=off $FS_NAME/var/lib
+			  zfs create -o canmount=off $FS_NAME/home 
+		  case 'ext4'
+			  echo 'ext4 is not supported'
+			  exit 2
+		  case '*'
+			  exit 1
+	  end
+	#+END_SRC
+
+*** mount psuedo-filesystems for chroot
+   #+BEGIN_SRC fish :tangle ~/chrot.sh :shebang "#! /usr/bin/env fish"
+	 set ROOT_DIR "/testing-other-linuxi/gentoodles/"
+	 mount --types proc /proc $ROOT_DIR/proc
+	 mount --rbind /sys $ROOT_DIR/sys
+	 mount --make-rslave $ROOT_DIR/sys
+	 mount --rbind /dev $ROOT_DIR/dev
+	 mount --make-rslave $ROOT_DIR/dev 
+   #+END_SRC
+
+   #+RESULTS:
+
+*** after chroot
+   #+BEGIN_SRC fish
+	 chroot $ROOT_DIR /bin/fish
+	 mount $BOOT_DIR /boot
+	 
+	 emerge-webrsync
+	 eselect profile list
+	 
+	 emerge --ask --verbose --update --deep --newuse @world
+	 # set use flags
+	 echo "ACCEPT_LICENSE="*"" >> /etc/portage/make.conf
+	 echo "GRUB_PLATFORMS="efi-64"" >> /etc/portage/make.conf
+	 # set timezone
+	 if test "$SERVICE_MANAGER" = "openrc"
+		 echo "America/Chicago" > /etc/timezone
+		 emerge --config sys-libs/timezone-data
+	 else if test "$SERVICE_MANAGER" = "systemd"
+		 echo "Systemd isnt setup"
+	 else
+		 exit 1
+	 end
+	 function generate-locale
+		 set LOCALE_CONF "en_US ISO-8859-1
+		 en_US.UTF-8 UTF-8"
+		 echo $LOCALE_DEFAULT >> /etc/locale.gen
+		 locale-gen 
+		 set LOCALE_ENV "LANG="en_US.utf8"
+		 LC_COLLATE="C.UTF-8""
+		 echo $LOCALE_ENV > /etc/env.d/02locale
+		 env-update
+	 end
+	 generate-locale
+	 # setup kernel
+	 emerge --ask sys-kernel/gentoo-sources
+	 if test "$CONFIGURE_KERNEL_P" = "yes"
+	 else
+		 emerge --ask sys-kernel/genkernel
+		 echo "ID=$BOOT_DIR /boot vfat noauto,defaults    1 2" >> /etc/fstab
+		 genkernel all
+	 end
+	 # set use flags
+	 set USE_FLAGGIES acl caps cgroups blas crypt emacs geoip git hardened inotify ipv6 libcaca lm-sensors magic ncurses policykit readline rss seccomp smp sockets ssl setuid symlink tcpd threads unicode xattr zstd
+	 switch (echo $MACHINE_TYPE)
+		 case 'laptop'
+			 set --append USE_FLAGGIES -gtk X bluetooth dbus encode exif ffmpeg fontconfig gui opengl pulseaudio acpi spell startup-notification truetype upower usb vaapi wifi xcomposite 
+		 case 'desktop'
+			 set --append USE_FLAGGIES -gtk X bluetooth dbus encode exif ffmpeg fontconfig gui opengl pulseaudio spell startup-notification truetype usb vaapi wifi xcomposite 
+		 case 'server'
+		 case '*'
+			 
+	 end
+	 echo "USE="$USE_FLAGGIES"" >> /etc/portage/make.conf
+	 dracut --hostonly
+	 
+	 
+	 set --export DRACUT_MODULES 
+	 set --export DRACUT_CONFIG "
+	 
+	 "
+	 
+	 set --export NVIDIA_USE driver tools
+	 set --export NVIDIA_CONF "
+	 options nvidia_drm modeset=1
+	 "
+	 #/etc/modules-load.d/video.conf
+	 cat /proc/mtrr
+   #+END_SRC
